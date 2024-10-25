@@ -1,0 +1,995 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>// global declarations
+clock tscs;                           // global clock to keep track of elapsed time
+int numSaved = 0;                     // number of saved civilians
+int numZRSaved = 0;                   // number of civilians saved by a zero responder
+int numFRSaved = 0;                   // number of civilians saved by a first responder
+
+const int numMan = 14;                 // number of civilians (id: 0 --&amp;gt; numMan-1)
+const int numResp = 3;                // number of first-responder (id: numMan --&amp;gt; numMan+numResp-1)
+const int numExits = 4;               // number of exists
+const int numDrones = 4;              // number of drones
+const int numFires = 2;               // number of fires
+
+// grid's parameters
+const int width = 12;                 // grid's width
+const int height = 11;                // grid's height
+const int FIRE = -2;                  // numerical representation of fire in the grid
+const int EXIT = -3;                  // numerical representation of exits in the grid
+const int EMPTY = -1;                 // numerical representation of empty cells in the grid
+
+// channels
+chan saved[numMan];                   // one channel between drone and civilians for each civilian for being saved
+chan tryingToMove[numMan+numResp];    // one channel between civilians and semaphore
+chan move[numMan+numResp];            // one channel between civilians and semaphore
+chan busy[numResp];                   // one channel between responder and drones (used for "booking" the responder)
+chan help[numMan];                    // one channel between civilians and drone for helping
+broadcast chan contact[numMan];       // one channel between drone and civilians for contacting the repsonder
+chan serving[numMan];                 // one channel between civlians and first responders
+chan jobRefused[numResp];             // one channel between first responders and drones
+broadcast chan sys_init;              // one channel to signal the end of the initialization phase
+
+//structs
+typedef struct{
+    int X;
+    int Y;
+}pos;
+
+int grid[width*height];                       // array representing the grid (fire, responders, civilians, exit) --&gt; given pos, get id
+                                              // civilians/responders = id, fire = -2, empty = -1, exit -3
+
+int manToSave[numMan];                        // array used to communicate the id of the civilians to be saved to the zeroResponder
+bool isInDanger[numMan];                      // array used to communicate to the drone if a civilian is in danger
+int timeToRescue[numMan+numResp];             // array used to communicate the rescue time to a civilian and firstResponder --&gt; FR busy when tFR!=0
+bool isDead[numMan];                          // array used for the dead civilians
+int idZeroResp[numResp];                      // array used to communicate the id of the ZR to the FR
+pos proposedPos[numMan+numResp];              // proposed position for the next move of the responders and civilians --&gt; given id, get pos
+pos globalActualPos[numMan+numResp];          // actual position of the responders and civilians --&gt; given id, get pos
+
+
+
+// system initialisation
+
+// parametric times
+const int parametric_rescue[numMan+numResp] = { 4, 5, 4, 4, 5, 3, 6, 5, 5, 6, 2, 4, 3, 5, 1, 2, 1 };       // tZR for civilians + tFR for first responders
+const int parametric_life[numMan] = { 5, 7, 6, 7, 8, 7, 9, 3, 12, 11, 12, 8, 7, 6 };                       // Tv for civilians
+
+// zero and first responders
+const pos init_C0 = { 2, 8 };
+const pos init_C1 = { 2, 9 };
+const pos init_C2 = { 8, 8 };
+const pos init_C3 = { 10, 10 };
+const pos init_C4 = { 9, 6 };
+const pos init_C5 = { 10, 4 };
+const pos init_C6 = { 8, 3 };
+const pos init_C7 = { 6, 2 };
+const pos init_C8 = { 6, 0 };
+const pos init_C9 = { 4, 4 };
+const pos init_C10 = { 3, 5 };
+const pos init_C11 = { 1, 5 };
+const pos init_C12 = { 3, 4 };
+const pos init_C13 = { 1, 1 };
+const pos init_R14 = { 9, 8 };
+const pos init_R15 = { 2, 6 };
+const pos init_R16 = { 7, 1 };
+const pos init_positions_man[numMan+numResp] = { init_C0, init_C1, init_C2, init_C3, init_C4, init_C5, init_C6, init_C7, init_C8, init_C9, init_C10, init_C11, init_C12, init_C13, init_R14, init_R15, init_R16 };
+// fires
+const pos init_topLeft_F1 = { 3, 7 };
+const pos init_bottRight_F1 = { 6, 6 };
+const pos init_topLeft_F2 = { 5, 6 };
+const pos init_bottRight_F2 = { 7, 3 };
+const pos init_positions_fires[numFires*2] = {init_topLeft_F1, init_bottRight_F1, init_topLeft_F2, init_bottRight_F2};
+// exits
+const pos init_E1 = { 0, 0 };
+const pos init_E2 = { 11, 0 };
+const pos init_E3 = { 0, 9 };
+const pos init_E4 = { 0, 10 };
+const pos init_positions_exit[numExits] = { init_E1, init_E2, init_E3, init_E4 };
+// drones 
+//D1
+const pos init_topLeft_D1 = { 1, 9 };
+const pos init_bottRight_D1 = { 4, 6 };
+const pos init_actual_D1   = init_topLeft_D1;
+//D2
+const pos init_topLeft_D2 = { 7, 9 };
+const pos init_bottRight_D2 = { 10, 6 };
+const pos init_actual_D2   = { 10, 9 };
+//D3
+const pos init_topLeft_D3 = { 1, 2 };
+const pos init_bottRight_D3 = { 3, 2 };
+const pos init_actual_D3   = init_topLeft_D3;
+//D4
+const pos init_topLeft_D4 = { 8, 2 };
+const pos init_bottRight_D4 = { 10, 2 };
+const pos init_actual_D4   = init_topLeft_D4;
+
+// initialization of the model
+void system_initialisation(){
+    // global vars
+    for(i:int[0,numMan+numResp-1]){
+        timeToRescue[i] = 0;
+        if(i&lt;numMan){
+            manToSave[i] = -1;
+            isInDanger[i] = false;
+            isDead[i] = false;
+        }
+        else{
+            idZeroResp[i-numMan] = 0; // it should be -1 but the simulator makes some problems...
+        }
+    }
+    // empty grid 
+    for(i:int[0,(width*height)-1]){
+        grid[i]=EMPTY;
+    }
+    // grid with zero and first responders
+    for(i:int[0,numMan+numResp-1]){
+        int x = init_positions_man[i].X;
+        int y = init_positions_man[i].Y;
+        grid[x+(y*width)] = i;
+        globalActualPos[i] = init_positions_man[i];
+        proposedPos[i] = init_positions_man[i];
+    }
+    // exits
+    for(i:int[0,numExits-1]){
+        int x = init_positions_exit[i].X;
+        int y = init_positions_exit[i].Y;
+        grid[x+(y*width)] = EXIT;
+    }
+    // fires
+    for(i:int[init_positions_fires[0].X, init_positions_fires[1].X]){
+       for(j:int[init_positions_fires[1].Y, init_positions_fires[0].Y]){
+           grid[i+(j*width)] = FIRE;
+        }
+    }
+    for(i:int[init_positions_fires[2].X, init_positions_fires[3].X]){
+       for(j:int[init_positions_fires[3].Y, init_positions_fires[2].Y]){
+           grid[i+(j*width)] = FIRE;
+        }
+    }
+}
+
+</declaration>
+	<template>
+		<name>FResponder</name>
+		<parameter>const int id, int x, int y, int tFR</parameter>
+		<declaration>// local declarations
+clock c;                           // internal clock
+int tB = 0;                        // time when the first responder is busy rescuing a civilian
+int nextX,nextY;                   // coordinates of the next position
+int ZRQueue[numMan];               // queue to save the IDs of the zero responders who asked for help
+int ZRQueueTime[numMan];           // time needed to rescue the civilian in danger associated with the i-th zero responder 
+bool initialization = true;        // keep track if the initialization has already been done
+int qLength = 0;                   // number of tasks (zero responders) in the queue
+int ZRServed = -1;                 // current zero responder who's been served
+int lastZRAdded = -1;              // last zero responder who's been served
+bool queueFull = false;            // true when the queue is full
+int queueMaxLen = numMan;          // max length of the queue
+
+// check on the validity of the next position
+void nextPos() {
+    pos newPos = { x, y };
+    // checking if the next possible position is valid (inside the grid). If not, a move is lost
+    if((x + nextX) &gt;= 0 &amp;&amp; (x + nextX) &lt; width &amp;&amp; (y + nextY) &gt;= 0 &amp;&amp; (y + nextY) &lt; height) {
+        newPos.X = x + nextX;
+        newPos.Y = y + nextY;
+    }
+    proposedPos[id] = newPos;
+}
+
+// update of the current position (if approved by the semaphore)
+void updateNextPos() {
+    x = globalActualPos[id].X;
+    y = globalActualPos[id].Y;
+}
+
+// function that manages the queue adding new tasks for the first responder
+void addZR(){
+    int ZRid = -1;
+    int rescueTime = -1;
+
+    if(initialization){
+        for(i:int[0,numMan-1]){
+            ZRQueue[i] = -1;
+            ZRQueueTime[i] = -1;
+        }
+        initialization = false;
+    }
+
+    ZRid = idZeroResp[id-numMan];
+    rescueTime = timeToRescue[id]+tFR;
+
+    if(qLength&lt;queueMaxLen){
+        ZRQueue[qLength]= ZRid;             // saving id of ZR
+        ZRQueueTime[ZRid] = rescueTime;     // saving time to Rescue
+        timeToRescue[ZRid] = rescueTime;    // telling ZR the time needed (queue not considered)
+        qLength = qLength + 1;
+        lastZRAdded = ZRid;
+        if(qLength==1){ 
+           ZRServed = ZRid;
+        }
+    } 
+    else { queueFull = true; }
+}
+
+// function that removes the zero responder who's just been served
+void removeZR(){
+    for(i:int[1,numMan-1]){
+        ZRQueue[i]=ZRQueue[i-1];
+    }
+    //ZRQueue[numMan-1]= -1; just for consistency
+    ZRQueueTime[ZRServed] = -1;
+    qLength=qLength-1;  
+    if(qLength&gt;0){
+        ZRServed = ZRQueue[0];
+    }
+    if(queueFull){ queueFull = false; }
+}
+
+</declaration>
+		<location id="id0" x="-212" y="-17">
+			<name x="-204" y="-51">Moving</name>
+			<label kind="invariant" x="-204" y="0">c&lt;=1</label>
+		</location>
+		<location id="id1" x="-977" y="-17">
+			<name x="-1087" y="-34">AuthWaiting</name>
+			<committed/>
+		</location>
+		<location id="id2" x="340" y="-17">
+			<name x="314" y="0">Free</name>
+			<committed/>
+		</location>
+		<location id="id3" x="68" y="-17">
+			<name x="34" y="0">Contacted</name>
+			<committed/>
+		</location>
+		<location id="id4" x="-620" y="-17">
+			<name x="-629" y="-59">PosI</name>
+			<committed/>
+		</location>
+		<location id="id5" x="-781" y="-17">
+			<name x="-790" y="-59">PosJ</name>
+			<committed/>
+		</location>
+		<location id="id6" x="-484" y="-17">
+			<name x="-493" y="0">CalcPos</name>
+			<committed/>
+		</location>
+		<location id="id7" x="612" y="-17">
+			<name x="595" y="17">Busy</name>
+			<label kind="invariant" x="629" y="-17">c&lt;=tB</label>
+		</location>
+		<location id="id8" x="858" y="-17">
+			<name x="883" y="-25">NewJob</name>
+			<committed/>
+		</location>
+		<location id="id9" x="-212" y="-263">
+			<name x="-222" y="-297">Init</name>
+			<committed/>
+		</location>
+		<init ref="id9"/>
+		<transition id="id10">
+			<source ref="id9"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-204" y="-161">sys_init?</label>
+		</transition>
+		<transition id="id11" controllable="false">
+			<source ref="id8"/>
+			<target ref="id7"/>
+			<label kind="guard" x="688" y="-144">queueFull</label>
+			<label kind="synchronisation" x="637" y="-127">jobRefused[id-numMan]!</label>
+			<nail x="807" y="-102"/>
+			<nail x="663" y="-102"/>
+		</transition>
+		<transition id="id12">
+			<source ref="id7"/>
+			<target ref="id8"/>
+			<label kind="guard" x="688" y="-76">c&lt;=tB</label>
+			<label kind="synchronisation" x="688" y="-59">busy[id-numMan]?</label>
+			<label kind="assignment" x="688" y="-42">addZR()</label>
+			<nail x="714" y="-17"/>
+		</transition>
+		<transition id="id13" controllable="false">
+			<source ref="id8"/>
+			<target ref="id7"/>
+			<label kind="guard" x="688" y="76">!queueFull</label>
+			<label kind="synchronisation" x="654" y="93">contact[lastZRAdded]!</label>
+			<nail x="824" y="68"/>
+			<nail x="663" y="68"/>
+		</transition>
+		<transition id="id14">
+			<source ref="id7"/>
+			<target ref="id2"/>
+			<label kind="guard" x="442" y="85">c&gt;=tB</label>
+			<label kind="assignment" x="425" y="68">removeZR()</label>
+			<nail x="544" y="68"/>
+			<nail x="391" y="68"/>
+		</transition>
+		<transition id="id15" controllable="false">
+			<source ref="id2"/>
+			<target ref="id7"/>
+			<label kind="guard" x="425" y="-93">qLength&gt;0</label>
+			<label kind="synchronisation" x="391" y="-76">serving[ZRServed]!</label>
+			<label kind="assignment" x="365" y="-59">tB:=ZRQueueTime[ZRServed],
+c:=0</label>
+			<nail x="425" y="-17"/>
+			<nail x="510" y="-17"/>
+		</transition>
+		<transition id="id16">
+			<source ref="id6"/>
+			<target ref="id4"/>
+			<label kind="assignment" x="-586" y="17">nextX:=-1</label>
+			<nail x="-518" y="17"/>
+			<nail x="-586" y="17"/>
+		</transition>
+		<transition id="id17">
+			<source ref="id6"/>
+			<target ref="id4"/>
+			<label kind="assignment" x="-578" y="-42">nextX:=0</label>
+		</transition>
+		<transition id="id18">
+			<source ref="id6"/>
+			<target ref="id4"/>
+			<label kind="assignment" x="-578" y="-76">nextX:=1</label>
+			<nail x="-509" y="-51"/>
+			<nail x="-577" y="-51"/>
+		</transition>
+		<transition id="id19">
+			<source ref="id0"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-467" y="-42">timeToRescue[id]==0 &amp;&amp; c==1</label>
+		</transition>
+		<transition id="id20">
+			<source ref="id4"/>
+			<target ref="id5"/>
+			<label kind="assignment" x="-722" y="-42">nextY:=0</label>
+		</transition>
+		<transition id="id21" controllable="false">
+			<source ref="id5"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="-934" y="-42">tryingToMove[id]!</label>
+			<label kind="assignment" x="-917" y="-8">nextPos()</label>
+		</transition>
+		<transition id="id22">
+			<source ref="id4"/>
+			<target ref="id5"/>
+			<label kind="assignment" x="-722" y="-76">nextY:=1</label>
+			<nail x="-645" y="-51"/>
+			<nail x="-739" y="-51"/>
+		</transition>
+		<transition id="id23">
+			<source ref="id4"/>
+			<target ref="id5"/>
+			<label kind="assignment" x="-721" y="17">nextY:=-1</label>
+			<nail x="-645" y="17"/>
+			<nail x="-739" y="17"/>
+		</transition>
+		<transition id="id24" controllable="false">
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="synchronisation" x="110" y="-42">contact[lastZRAdded]!</label>
+		</transition>
+		<transition id="id25">
+			<source ref="id0"/>
+			<target ref="id3"/>
+			<label kind="synchronisation" x="-110" y="-59">busy[id-numMan]?</label>
+			<label kind="assignment" x="-76" y="-42">addZR()</label>
+		</transition>
+		<transition id="id26">
+			<source ref="id2"/>
+			<target ref="id0"/>
+			<label kind="guard" x="17" y="110">qLength==0</label>
+			<label kind="assignment" x="17" y="127">timeToRescue[id]=0,
+c:=0</label>
+			<nail x="68" y="102"/>
+		</transition>
+		<transition id="id27">
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-629" y="161">move[id]?</label>
+			<label kind="assignment" x="-629" y="178">c:=0,
+updateNextPos()</label>
+			<nail x="-977" y="153"/>
+			<nail x="-212" y="153"/>
+		</transition>
+	</template>
+	<template>
+		<name>Drone</name>
+		<parameter>const pos topLeft, const pos bottomRight, pos actualPos, const int Nv</parameter>
+		<declaration>// local declarations
+clock c;                       // internal clock
+bool canAct = false;           // true when the drone detects a civilian in danger
+int idZeroResponder = -1;      // id of the zero responder instructed to rescue the civilian in danger
+int idVictim = -1;             // id of the civilian in danger
+int idFirstResponder = -1;     // id of the first responder called to rescue the civilian in danger
+int timeToRescueLocal;         // keep track of the current time to rescue 
+bool respFound = false;        // true when there is a free first responder ready to be called
+bool respBusyFound = false;    // true when a busy first responder is found
+bool instruct;                 // true when the final choice is to instruct the zero responder
+
+// calculate next position (pre-defined path) --&gt; semaphore not needed (no risk of conflicts)
+void nextPos(){
+    if(actualPos.Y == topLeft.Y &amp;&amp; actualPos.X != bottomRight.X){
+        actualPos.X = actualPos.X + 1;
+    } else if(actualPos.X == bottomRight.X &amp;&amp; actualPos.Y != bottomRight.Y) {
+        actualPos.Y = actualPos.Y - 1;
+    } else if(actualPos.Y == bottomRight.Y &amp;&amp; actualPos.X != topLeft.X) {
+        actualPos.X = actualPos.X - 1;
+    } else if(actualPos.X == topLeft.X &amp;&amp; actualPos.Y != topLeft.Y) {
+        actualPos.Y = actualPos.Y + 1;
+    }
+}
+
+// scan of the grid to look for civilians in danger
+void checkForRescue(){
+    idZeroResponder = -1;
+    idVictim = -1;
+    canAct = false;
+    // checking for one victim and one zero responder
+    for(i:int[-Nv,Nv]){
+        for(j:int[-Nv,Nv]){
+            int adjPos = (actualPos.X+i)+((actualPos.Y+j)*width);
+            // checking if the adjacent position is inside the grid
+            if((actualPos.X + i) &gt;= 0 &amp;&amp; (actualPos.X + i) &lt; width &amp;&amp; (actualPos.Y + j) &gt;= 0 &amp;&amp; (actualPos.Y + j) &lt; height) {
+                int id = grid[adjPos];
+                if(idVictim == - 1 &amp;&amp; id &gt;= 0 &amp;&amp; id &lt; numMan &amp;&amp; isInDanger[id]) {
+                    idVictim = id;
+                }
+                if(idZeroResponder  == - 1 &amp;&amp; id &gt;= 0 &amp;&amp; id &lt; numMan &amp;&amp; !isInDanger[id]) {
+                    idZeroResponder = id;
+                }
+            }
+        }
+    }
+    if(idZeroResponder != -1 &amp;&amp; idVictim != -1) {
+        int posZeroResp = globalActualPos[idZeroResponder].X + (globalActualPos[idZeroResponder].Y*width);
+        int posVictim = globalActualPos[idVictim].X + (globalActualPos[idVictim].Y*width);
+        grid[posZeroResp] = EMPTY;
+        grid[posVictim] = EMPTY; 
+        canAct = true;
+    }
+}
+
+// calculating the distance between position 'start' and 'end'
+int distance(pos start, pos end) {
+    int diffX = abs(start.X - end.X);
+    int diffY = abs(start.Y - end.Y);
+    return (diffX &gt;= diffY ) ? diffX : diffY;
+}
+
+// this function id used to inform the ZeroResponder of the victim's id and to search for a free FirstResponder. The drone calculates the distance between 
+// the ZeroResponder and the found FirstResponder + distance between firstResponder and the victim
+void contactFunc() {
+    int idNearerFR = -1;
+    int respDistance = -1;
+    int shortestDistanceFree = -1;
+    int shortestDistanceGlobal = -1;
+    respFound = false;
+    respBusyFound = false;
+
+    for(i:int[numMan,numMan+numResp-1]) {
+        respDistance = distance(globalActualPos[idZeroResponder], globalActualPos[i]) + distance(globalActualPos[i], globalActualPos[idVictim]);
+        // finding the nearest FR (busy or not)
+        if(idNearerFR = -1){ 
+           idNearerFR = i;
+           shortestDistanceGlobal = respDistance;
+        } else if(respDistance &lt; shortestDistanceGlobal){
+            idNearerFR = i;
+            shortestDistanceGlobal = respDistance;
+        }
+        // finding the nearest free FR
+        if(timeToRescue[i] == 0) {
+            if(!respFound){
+                idFirstResponder = i;
+                timeToRescueLocal = respDistance;
+                shortestDistanceFree = respDistance;
+                respFound = true;
+            } else if(respFound &amp;&amp; respDistance&lt;shortestDistanceFree){
+                idFirstResponder = i;
+                timeToRescueLocal = respDistance;
+                shortestDistanceFree = respDistance;
+            }
+        }
+    }
+    // in case no free FRs are found, just choose the nearest one
+    if(!respFound) {
+        idFirstResponder = idNearerFR;
+        timeToRescueLocal = shortestDistanceGlobal;
+        respBusyFound = true;
+    }
+}
+
+// this function is used to inform the ZeroResponder of the victim's id. The drone calculates the distance between the ZeroResponder and victim
+void helpFunc() {
+    timeToRescue[idZeroResponder] = distance(globalActualPos[idZeroResponder], globalActualPos[idVictim]);
+}
+
+
+// take the final decision based on the distances and the time needed for rescuing the victim
+void takeDecision() {
+    int busyWeigth = 1;
+    // evaluating ZR distance
+    int distanceZR = distance(globalActualPos[idZeroResponder], globalActualPos[idVictim]);
+    // evaluating the "best FR" distance
+    contactFunc();  
+    
+    // re-evaluating the "best FR" distance with respect to the ZR distance, considering also the FR's queue (if it's already busy or not)
+    busyWeigth = respBusyFound ? (numMan/numResp) : 1; 
+    timeToRescueLocal = busyWeigth * (timeToRescueLocal * ( 1 - (distanceZR/timeToRescueLocal)));  
+    
+    // choosing the first responder is better since they have a lower tFR
+    if(timeToRescueLocal &lt;= distanceZR) {
+        // first responder
+        timeToRescue[idFirstResponder] = timeToRescueLocal;
+        idZeroResp[idFirstResponder-numMan] = idZeroResponder;
+        instruct = false;   
+    } else {
+        // zero responder
+        timeToRescue[idZeroResponder] = distanceZR;
+        instruct = true;
+    }
+    manToSave[idZeroResponder] = idVictim;
+}
+
+
+
+</declaration>
+		<location id="id28" x="0" y="8">
+			<name x="17" y="-25">Moving</name>
+			<label kind="invariant" x="17" y="17">c&lt;=1</label>
+		</location>
+		<location id="id29" x="-467" y="314">
+			<name x="-527" y="331">ComputeNextPos</name>
+			<committed/>
+		</location>
+		<location id="id30" x="-748" y="8">
+			<name x="-1037" y="-25">TakeDecision</name>
+			<committed/>
+		</location>
+		<location id="id31" x="-493" y="-170">
+			<name x="-552" y="-204">FRContacted</name>
+			<committed/>
+		</location>
+		<location id="id32" x="-637" y="-68">
+			<name x="-705" y="-93">FindFR</name>
+			<committed/>
+		</location>
+		<location id="id33" x="-391" y="8">
+			<name x="-433" y="25">InstructZR</name>
+			<committed/>
+		</location>
+		<location id="id34" x="-969" y="8">
+			<committed/>
+		</location>
+		<location id="id35" x="229" y="8">
+			<name x="219" y="-26">Init</name>
+			<committed/>
+		</location>
+		<init ref="id35"/>
+		<transition id="id36">
+			<source ref="id35"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="93" y="8">sys_init?</label>
+		</transition>
+		<transition id="id37">
+			<source ref="id34"/>
+			<target ref="id28"/>
+			<label kind="guard" x="-493" y="161">!canAct</label>
+			<label kind="assignment" x="-484" y="178">c:=0</label>
+			<nail x="-476" y="153"/>
+		</transition>
+		<transition id="id38">
+			<source ref="id34"/>
+			<target ref="id30"/>
+			<label kind="guard" x="-892" y="-34">canAct</label>
+			<label kind="assignment" x="-918" y="-17">takeDecision()</label>
+		</transition>
+		<transition id="id39">
+			<source ref="id29"/>
+			<target ref="id34"/>
+			<label kind="assignment" x="-858" y="323">checkForRescue()</label>
+			<nail x="-969" y="314"/>
+		</transition>
+		<transition id="id40">
+			<source ref="id31"/>
+			<target ref="id33"/>
+			<label kind="synchronisation" x="-425" y="-110">jobRefused[idFirstResponder-numMan]?</label>
+			<label kind="assignment" x="-425" y="-93">helpFunc()</label>
+		</transition>
+		<transition id="id41">
+			<source ref="id31"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="-340" y="-195">contact[idZeroResponder]?</label>
+			<label kind="assignment" x="-255" y="-170">c:=0</label>
+			<nail x="0" y="-170"/>
+		</transition>
+		<transition id="id42" controllable="false">
+			<source ref="id33"/>
+			<target ref="id28"/>
+			<label kind="synchronisation" x="-306" y="-17">help[idZeroResponder]!</label>
+			<label kind="assignment" x="-238" y="8">c:=0</label>
+		</transition>
+		<transition id="id43">
+			<source ref="id30"/>
+			<target ref="id33"/>
+			<label kind="guard" x="-612" y="-17">instruct</label>
+		</transition>
+		<transition id="id44" controllable="false">
+			<source ref="id32"/>
+			<target ref="id31"/>
+			<label kind="synchronisation" x="-824" y="-136">busy[idFirstResponder-numMan]!</label>
+		</transition>
+		<transition id="id45">
+			<source ref="id30"/>
+			<target ref="id32"/>
+			<label kind="guard" x="-765" y="-51">!instruct</label>
+		</transition>
+		<transition id="id46">
+			<source ref="id28"/>
+			<target ref="id29"/>
+			<label kind="guard" x="-229" y="314">c==1</label>
+			<label kind="assignment" x="-246" y="289">nextPos()</label>
+			<nail x="0" y="314"/>
+		</transition>
+	</template>
+	<template>
+		<name x="5" y="5">Civilians</name>
+		<parameter>const int id, int x, int y, const int tZR, const int Tv</parameter>
+		<declaration>// local declarations
+clock c;                       // internal clock
+int tR;                        // time to rescue a civilian in danger                 
+bool isSafe = false;           // true when the civilian is close to the fire (in danger)
+int nextX,nextY;               // coordinates of the next position
+bool rescue = false;
+
+void updateStat() {
+    if (rescue) { numZRSaved = numZRSaved + 1; }
+    else { numFRSaved = numFRSaved + 1; }
+}
+
+// check on the validity of the next position
+void nextPos() {
+    pos newPos = { x, y };
+    // checking if the next possible position is valid (inside the grid). If not, a move is lost
+    if((x + nextX) &gt;= 0 &amp;&amp; (x + nextX) &lt; width &amp;&amp; (y + nextY) &gt;= 0 &amp;&amp; (y + nextY) &lt; height) {
+        newPos.X = x + nextX;
+        newPos.Y = y + nextY;
+    }
+    proposedPos[id] = newPos;
+}
+
+// updating the status of the civilian. If close to the exit -&gt; safe, if close to the fire -&gt; danger
+void checkStatus() {
+    // checking fire and exits on adjacent cells
+    for(i:int[-1,1]){
+        for(j:int[-1,1]){
+            int adjPos = (x+i)+((y+j)*width);
+            // checking if the adjacent position is inside the grid
+            if((x + i) &gt;= 0 &amp;&amp; (x + i) &lt; width &amp;&amp; (y + j) &gt;= 0 &amp;&amp; (y + j) &lt; height) {
+                if(grid[adjPos] == FIRE){ isInDanger[id] = true; }
+                if(grid[adjPos] == EXIT){ isSafe = true; }
+            }
+        }
+    }
+    if(isSafe) {
+        grid[x+(y*width)] = EMPTY;
+        numSaved = numSaved + 1;
+    }
+}
+
+// update of the current position (if approved by the semaphore)
+void updateNextPos() {
+    x = globalActualPos[id].X;
+    y = globalActualPos[id].Y;
+    // checking if the new position is near the fire
+    checkStatus();
+}
+
+void updateSaved() {
+    numSaved = numSaved + 1;
+}
+
+void emptyGrid() {
+    grid[x+(y*width)] = EMPTY;
+} 
+</declaration>
+		<location id="id47" x="-315" y="-17">
+			<name x="-297" y="-42">Moving</name>
+			<label kind="invariant" x="-306" y="-8">c&lt;=1</label>
+		</location>
+		<location id="id48" x="314" y="-289">
+			<name x="304" y="-323">Dead</name>
+		</location>
+		<location id="id49" x="102" y="323">
+			<name x="85" y="340">Safe</name>
+		</location>
+		<location id="id50" x="59" y="-289">
+			<name x="33" y="-323">Danger</name>
+			<label kind="invariant" x="17" y="-272">c &lt;= Tv</label>
+		</location>
+		<location id="id51" x="-17" y="-17">
+			<name x="0" y="-8">Rescue</name>
+			<label kind="invariant" x="-93" y="-42">c &lt;= tR</label>
+		</location>
+		<location id="id52" x="-654" y="-17">
+			<name x="-662" y="0">CalcPos</name>
+			<committed/>
+		</location>
+		<location id="id53" x="-799" y="-17">
+			<name x="-808" y="-59">PosI</name>
+			<committed/>
+		</location>
+		<location id="id54" x="-960" y="-17">
+			<name x="-968" y="-59">PosJ</name>
+			<committed/>
+		</location>
+		<location id="id55" x="-1156" y="-17">
+			<name x="-1224" y="-59">AuthWaiting</name>
+			<committed/>
+		</location>
+		<location id="id56" x="-17" y="-127">
+			<name x="0" y="-144">WaitingTurn</name>
+		</location>
+		<location id="id57" x="-629" y="-272">
+			<name x="-639" y="-306">Init</name>
+			<committed/>
+		</location>
+		<init ref="id57"/>
+		<transition id="id58">
+			<source ref="id57"/>
+			<target ref="id47"/>
+			<label kind="synchronisation" x="-561" y="-297">sys_init?</label>
+			<label kind="assignment" x="-578" y="-272">checkStatus()</label>
+			<nail x="-425" y="-272"/>
+		</transition>
+		<transition id="id59">
+			<source ref="id56"/>
+			<target ref="id51"/>
+			<label kind="synchronisation" x="0" y="-102">serving[id]?</label>
+			<label kind="assignment" x="0" y="-85">c:=0</label>
+		</transition>
+		<transition id="id60">
+			<source ref="id47"/>
+			<target ref="id56"/>
+			<label kind="synchronisation" x="-212" y="-195">contact[id]?</label>
+			<label kind="assignment" x="-212" y="-178">tR:=timeToRescue[id],
+rescue = false</label>
+			<nail x="-221" y="-127"/>
+		</transition>
+		<transition id="id61">
+			<source ref="id47"/>
+			<target ref="id52"/>
+			<label kind="guard" x="-603" y="-85">timeToRescue[id]==0 &amp;&amp; c==1 &amp;&amp;
+!isInDanger[id] &amp;&amp;
+!isSafe</label>
+		</transition>
+		<transition id="id62">
+			<source ref="id55"/>
+			<target ref="id47"/>
+			<label kind="synchronisation" x="-816" y="110">move[id]?</label>
+			<label kind="assignment" x="-815" y="136">c:=0,
+updateNextPos()</label>
+			<nail x="-1080" y="136"/>
+			<nail x="-425" y="136"/>
+		</transition>
+		<transition id="id63">
+			<source ref="id51"/>
+			<target ref="id49"/>
+			<label kind="guard" x="-221" y="153">c&gt;=tR &amp;&amp; isDead[manToSave[id]]</label>
+			<label kind="assignment" x="-170" y="170">updateSaved()</label>
+		</transition>
+		<transition id="id64">
+			<source ref="id47"/>
+			<target ref="id49"/>
+			<label kind="guard" x="-161" y="297">isSafe</label>
+			<nail x="-314" y="323"/>
+		</transition>
+		<transition id="id65">
+			<source ref="id47"/>
+			<target ref="id51"/>
+			<label kind="synchronisation" x="-246" y="-8">help[id]?</label>
+			<label kind="assignment" x="-246" y="8">c := 0,
+tR := timeToRescue[id]+tZR,
+rescue = true</label>
+			<nail x="-144" y="-17"/>
+		</transition>
+		<transition id="id66" controllable="false">
+			<source ref="id51"/>
+			<target ref="id49"/>
+			<label kind="guard" x="34" y="-51">c &gt;= tR &amp;&amp; !isDead[manToSave[id]]</label>
+			<label kind="synchronisation" x="119" y="-34">saved[manToSave[id]]!</label>
+			<label kind="assignment" x="119" y="-17">updateSaved(),
+updateStat()</label>
+			<nail x="102" y="-17"/>
+		</transition>
+		<transition id="id67">
+			<source ref="id50"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="357" y="-59">saved[id]?</label>
+			<label kind="assignment" x="374" y="-34">updateSaved()</label>
+			<nail x="382" y="0"/>
+			<nail x="382" y="0"/>
+		</transition>
+		<transition id="id68">
+			<source ref="id50"/>
+			<target ref="id48"/>
+			<label kind="guard" x="136" y="-314">c &gt;= Tv</label>
+			<label kind="assignment" x="136" y="-280">isDead[id]=true,
+emptyGrid()</label>
+		</transition>
+		<transition id="id69">
+			<source ref="id47"/>
+			<target ref="id50"/>
+			<label kind="guard" x="-297" y="-314">isInDanger[id] &amp;&amp; !isSafe</label>
+			<label kind="assignment" x="-212" y="-289">c := 0</label>
+			<nail x="-314" y="-289"/>
+		</transition>
+		<transition id="id70">
+			<source ref="id52"/>
+			<target ref="id53"/>
+			<label kind="assignment" x="-765" y="17">nextX:=-1</label>
+			<nail x="-697" y="17"/>
+			<nail x="-765" y="17"/>
+		</transition>
+		<transition id="id71">
+			<source ref="id52"/>
+			<target ref="id53"/>
+			<label kind="assignment" x="-757" y="-42">nextX:=0</label>
+		</transition>
+		<transition id="id72">
+			<source ref="id52"/>
+			<target ref="id53"/>
+			<label kind="assignment" x="-748" y="-76">nextX:=1</label>
+			<nail x="-688" y="-51"/>
+			<nail x="-756" y="-51"/>
+		</transition>
+		<transition id="id73">
+			<source ref="id53"/>
+			<target ref="id54"/>
+			<label kind="assignment" x="-901" y="-42">nextY:=0</label>
+		</transition>
+		<transition id="id74" controllable="false">
+			<source ref="id54"/>
+			<target ref="id55"/>
+			<label kind="synchronisation" x="-1113" y="-42">tryingToMove[id]!</label>
+			<label kind="assignment" x="-1088" y="-17">nextPos()</label>
+		</transition>
+		<transition id="id75">
+			<source ref="id53"/>
+			<target ref="id54"/>
+			<label kind="assignment" x="-901" y="-76">nextY:=1</label>
+			<nail x="-824" y="-51"/>
+			<nail x="-918" y="-51"/>
+		</transition>
+		<transition id="id76">
+			<source ref="id53"/>
+			<target ref="id54"/>
+			<label kind="assignment" x="-900" y="17">nextY:=-1</label>
+			<nail x="-824" y="17"/>
+			<nail x="-918" y="17"/>
+		</transition>
+	</template>
+	<template>
+		<name>Semaphore</name>
+		<declaration>int id;            // id of the contacted civilian
+
+void checkProposedPos(int propId){
+    int propX =  proposedPos[propId].X;
+    int propY =  proposedPos[propId].Y;
+    int actualX = globalActualPos[propId].X;
+    int actualY = globalActualPos[propId].Y;
+    int gridPos = propX+(width*propY);
+    id = propId;
+
+    if(grid[gridPos]==EMPTY){
+        // update of GRID 
+        grid[actualX+(actualY*width)] = EMPTY;
+        // update of actual position for civilians ID
+        globalActualPos[id].X = propX;
+        globalActualPos[id].Y = propY;
+        grid[propX+(propY*width)] = id;
+    }
+}</declaration>
+		<location id="id77" x="-255" y="-17">
+			<name x="-280" y="-51">Waiting</name>
+		</location>
+		<location id="id78" x="85" y="-17">
+			<name x="76" y="-51">Check</name>
+			<committed/>
+		</location>
+		<location id="id79" x="-493" y="-17">
+			<name x="-510" y="-51">Idle</name>
+			<committed/>
+		</location>
+		<init ref="id79"/>
+		<transition id="id80" controllable="false">
+			<source ref="id79"/>
+			<target ref="id77"/>
+			<label kind="synchronisation" x="-416" y="-42">sys_init!</label>
+			<label kind="assignment" x="-467" y="-8">system_initialisation()</label>
+		</transition>
+		<transition id="id81" controllable="false">
+			<source ref="id78"/>
+			<target ref="id77"/>
+			<label kind="synchronisation" x="-110" y="51">move[id]!</label>
+			<nail x="-76" y="42"/>
+		</transition>
+		<transition id="id82">
+			<source ref="id77"/>
+			<target ref="id78"/>
+			<label kind="select" x="-187" y="-161">propId:int[0,(numMan+numResp)-1]</label>
+			<label kind="synchronisation" x="-153" y="-136">tryingToMove[propId]?</label>
+			<label kind="assignment" x="-170" y="-110">checkProposedPos(propId)</label>
+			<nail x="-85" y="-85"/>
+		</transition>
+	</template>
+	<system>// Template instantiations
+
+// civilians
+C0 = Civilians(0, init_positions_man[0].X, init_positions_man[0].Y, parametric_rescue[0], parametric_life[0]);
+C1 = Civilians(1, init_positions_man[1].X, init_positions_man[1].Y, parametric_rescue[1], parametric_life[1]);
+C2 = Civilians(2, init_positions_man[2].X, init_positions_man[2].Y, parametric_rescue[2], parametric_life[2]);
+C3 = Civilians(3, init_positions_man[3].X, init_positions_man[3].Y, parametric_rescue[3], parametric_life[3]);
+C4 = Civilians(4, init_positions_man[4].X, init_positions_man[4].Y, parametric_rescue[4], parametric_life[4]);
+C5 = Civilians(5, init_positions_man[5].X, init_positions_man[5].Y, parametric_rescue[5], parametric_life[5]);
+C6 = Civilians(6, init_positions_man[6].X, init_positions_man[6].Y, parametric_rescue[6], parametric_life[6]);
+C7 = Civilians(7, init_positions_man[7].X, init_positions_man[7].Y, parametric_rescue[7], parametric_life[7]);
+C8 = Civilians(8, init_positions_man[8].X, init_positions_man[8].Y, parametric_rescue[8], parametric_life[8]);
+C9 = Civilians(9, init_positions_man[9].X, init_positions_man[9].Y, parametric_rescue[9], parametric_life[9]);
+C10 = Civilians(10, init_positions_man[10].X, init_positions_man[10].Y, parametric_rescue[10], parametric_life[10]);
+C11 = Civilians(11, init_positions_man[11].X, init_positions_man[11].Y, parametric_rescue[11], parametric_life[11]);
+C12 = Civilians(12, init_positions_man[12].X, init_positions_man[12].Y, parametric_rescue[12], parametric_life[12]);
+C13 = Civilians(13, init_positions_man[13].X, init_positions_man[13].Y, parametric_rescue[13], parametric_life[13]);
+
+// first responders
+R14 = FResponder(14, init_positions_man[14].X, init_positions_man[14].Y, parametric_rescue[14]);
+R15 = FResponder(15, init_positions_man[15].X, init_positions_man[15].Y, parametric_rescue[15]);
+R16 = FResponder(16, init_positions_man[16].X, init_positions_man[16].Y, parametric_rescue[16]);
+
+// drones
+D1 = Drone(init_topLeft_D1, init_bottRight_D1, init_actual_D1, 1);
+D2 = Drone(init_topLeft_D2, init_bottRight_D2, init_actual_D2, 1);
+D3 = Drone(init_topLeft_D3, init_bottRight_D3, init_actual_D3, 2);
+D4 = Drone(init_topLeft_D4, init_bottRight_D4, init_actual_D4, 2);
+
+// semaphore
+S = Semaphore();
+
+// system declaration
+system C0,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,R14,R15,R16,D1,D2,D3,D4,S;</system>
+	<queries>
+		<query>
+			<formula>E&lt;&gt;(numSaved &gt;= 10 &amp;&amp; tscs &lt;= 14) </formula>
+			<comment>It is possible for a percentage 10/14 of all civilians to reach a safe state within 14 time units</comment>
+			<result outcome="success" type="quality" timestamp="2024-07-18 00:33:35 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A&lt;&gt;(numSaved&gt;=1 &amp;&amp; tscs&lt;=1)</formula>
+			<comment>A percentage 1/14 of all civilians is always guaranteed to reach a safe state within 1 time unit</comment>
+			<option key="--exploration" value="0"/>
+			<option key="--search-order" value="2"/>
+			<result outcome="success" type="quality" timestamp="2024-07-18 01:03:06 +0200">
+				<option key="--exploration" value="0"/>
+				<option key="--search-order" value="2"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt;((numZRSaved + numFRSaved) * 100 / numSaved &gt;= 42)</formula>
+			<comment>It is possible to reach a percentage 42% of civilians rescued by others over the total amount of saved civilians</comment>
+			<option key="--exploration" value="1"/>
+			<result outcome="success" type="quality" timestamp="2024-07-21 16:54:13 +0200">
+				<option key="--exploration" value="1"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(numFRSaved&gt;=2)</formula>
+			<comment>It is possible to reach a number of 2 rescues by the first responders</comment>
+			<option key="--exploration" value="1"/>
+			<result outcome="success" type="quality" timestamp="2024-07-22 11:05:31 +0200">
+				<option key="--exploration" value="1"/>
+			</result>
+		</query>
+	</queries>
+</nta>

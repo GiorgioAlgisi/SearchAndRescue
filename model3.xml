@@ -1,0 +1,1300 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>// global declarations
+clock tscs;                           // global clock to keep track of elapsed time
+int numSaved = 0;                     // number of saved civilians
+int numZRSaved = 0;
+int numFRSaved = 0;
+
+const int numMan = 14;                 // number of civilians (id: 0 --&amp;amp;gt; numMan-1)
+const int numResp = 3;                // number of first-responder (id: numMan --&amp;amp;gt; numMan+numResp-1)
+const int numExits = 4;               // number of exists
+const int numDrones = 4;              // number of drones
+const int numFires = 2;               // number of fires
+const int pathMaxLength = 50;         // max length of a path around the fires
+const int fireDistance = 2;           // distance to keep from the fire when going around it
+int pathLengthFR = 0;                 // current length of the path around the fire
+int arrayIndexFR = 0;                 // current position's index in the path around the fires
+
+// grid's parameters
+const int width = 12;                 // grid's width
+const int height = 11;                // grid's height
+const int FIRE = -2;                  // numerical representation of fire in the grid
+const int EXIT = -3;                  // numerical representation of exits in the grid
+const int EMPTY = -1;                 // numerical representation of empty cells in the grid
+const int MAX_STEPS = (width &gt; height) ? width : height;
+
+// channels
+chan saved[numMan];                   // one channel between drone and civilians for each civilian for being saved
+chan tryingToMove[numMan+numResp];    // one channel between civilians and semaphore
+chan move[numMan+numResp];            // one channel between civilians and semaphore
+chan busy[numResp];                   // one channel between responder and drones (used for "booking" the responder)
+chan help[numMan];                    // one channel between civilians and drone for helping
+broadcast chan contact[numMan];       // one channel between drone and civilians for contacting the repsonder
+chan serving[numMan];                 // one channel between civlians and first responders
+chan jobRefused[numResp];             // one channel between first responders and drones
+broadcast chan sys_init;              // one channel to signal the end of the initialization phase
+
+//structs
+typedef struct{
+    int X;
+    int Y;
+}pos;
+
+int grid[width*height];                       // array representing the grid (fire, responders, civilians, exit) --&amp;gt; given pos, get id
+                                              // civilians/responders = id, fire = -2, empty = -1, exit -3
+
+int manToSave[numMan];                        // array used to communicate the id of the civilians to be saved to the zeroResponder
+bool isInDanger[numMan];                      // array used to communicate to the drone if a civilian is in danger
+int timeToRescue[numMan+numResp];             // array used to communicate the rescue time to a civilian and firstResponder --&amp;gt; FR busy when tFR!=0
+bool isDead[numMan];                          // array used for the dead civilians
+int idZeroResp[numResp];                      // array used to communicate the id of the ZR to the FR
+pos proposedPos[numMan+numResp];              // proposed position for the next move of the responders and civilians --&amp;gt; given id, get pos
+pos globalActualPos[numMan+numResp];          // actual position of the responders and civilians --&amp;gt; given id, get pos
+pos fireBoundaryFR[pathMaxLength];            // boundary positions of the fire
+
+
+// system initialisation
+
+// parametric times
+const int parametric_rescue[numMan+numResp] = { 4, 5, 4, 4, 5, 3, 6, 5, 5, 6, 2, 4, 3, 5, 1, 2, 1 };       // tZR for civilians + tFR for first responders
+const int parametric_life[numMan] = { 5, 7, 6, 7, 8, 7, 9, 3, 12, 11, 12, 8, 7, 6 };                       // Tv for civilians
+
+// zero and first responders
+const pos init_C0 = { 2, 8 };
+const pos init_C1 = { 2, 9 };
+const pos init_C2 = { 8, 8 };
+const pos init_C3 = { 10, 10 };
+const pos init_C4 = { 9, 6 };
+const pos init_C5 = { 10, 4 };
+const pos init_C6 = { 8, 3 };
+const pos init_C7 = { 6, 2 };
+const pos init_C8 = { 6, 0 };
+const pos init_C9 = { 4, 4 };
+const pos init_C10 = { 3, 5 };
+const pos init_C11 = { 1, 5 };
+const pos init_C12 = { 3, 4 };
+const pos init_C13 = { 1, 1 };
+const pos init_R14 = { 9, 8 };
+const pos init_R15 = { 2, 6 };
+const pos init_R16 = { 7, 1 };
+const pos init_positions_man[numMan+numResp] = { init_C0, init_C1, init_C2, init_C3, init_C4, init_C5, init_C6, init_C7, init_C8, init_C9, init_C10, init_C11, init_C12, init_C13, init_R14, init_R15, init_R16 };
+// fires
+const pos init_topLeft_F1 = { 3, 7 };
+const pos init_bottRight_F1 = { 6, 6 };
+const pos init_topLeft_F2 = { 5, 6 };
+const pos init_bottRight_F2 = { 7, 3 };
+const pos init_positions_fires[numFires*2] = {init_topLeft_F1, init_bottRight_F1, init_topLeft_F2, init_bottRight_F2};
+// exits
+const pos init_E1 = { 0, 0 };
+const pos init_E2 = { 11, 0 };
+const pos init_E3 = { 0, 9 };
+const pos init_E4 = { 0, 10 };
+const pos init_positions_exit[numExits] = { init_E1, init_E2, init_E3, init_E4 };
+// drones
+//D1
+const pos init_actual_D1   = { 1, 9 };
+//D2
+const pos init_actual_D2   = { 10, 9 };
+//D3
+const pos init_actual_D3   = { 1, 2 };
+//D4
+const pos init_actual_D4   = { 8, 2 };
+
+// check if a fire boundary is already present
+bool IsDuplicatedGL(pos newPos){
+    int i=0;
+    for(i=0; i&lt;pathMaxLength; i++){
+        if(i&lt;arrayIndexFR &amp;&amp; fireBoundaryFR[i].X == newPos.X &amp;&amp; fireBoundaryFR[i].Y == newPos.Y){
+            return true;
+        }
+    }
+    return false;
+}
+
+// check if a fire boundary is overlapped with a fire
+bool isOverlappedGL(pos newPos, int fire){
+    int f = 0;   
+     for(f=0; f&lt;numFires; f++){
+         if(f!=fire &amp;&amp; newPos.X &gt;= init_positions_fires[f*2].X-fireDistance &amp;&amp; newPos.X &lt;= init_positions_fires[(f*2)+1].X+fireDistance 
+                 &amp;&amp; newPos.Y &gt;= init_positions_fires[(f*2)+1].Y-fireDistance &amp;&amp; newPos.Y &lt;= init_positions_fires[f*2].Y+fireDistance){
+                 return true;
+         }
+     }
+    return false;
+}
+
+// computation of the fire boundaries given a distance v
+void savefireBoundaryFR(int v) {
+    pos currPos;
+    int f=0;
+    for(f=0; f&lt;numFires; f++){
+        for(i:int[0, width]) {
+            if(i &gt;= init_positions_fires[f*2].X-v &amp;&amp; i &lt;= init_positions_fires[(f*2)+1].X+v) {
+                if(grid[i+((init_positions_fires[f*2].Y+v)*width)] != FIRE) {
+                    currPos.X = i;
+                    currPos.Y = init_positions_fires[f*2].Y+v;
+                    if(!IsDuplicatedGL(currPos) &amp;&amp; !isOverlappedGL(currPos, f)){
+                        fireBoundaryFR[arrayIndexFR] = currPos;
+                        arrayIndexFR++;
+                    }
+                }
+                if(grid[i+((init_positions_fires[(f*2)+1].Y-v)*width)] != FIRE) {
+                    currPos.X = i;
+                    currPos.Y = init_positions_fires[(f*2)+1].Y-v;
+                    if(!IsDuplicatedGL(currPos) &amp;&amp; !isOverlappedGL(currPos, f)){
+                        fireBoundaryFR[arrayIndexFR] = currPos;
+                        arrayIndexFR++;
+                    }
+                }
+            }
+        }
+        for(j:int[0, height]) {
+            if(j &gt;= init_positions_fires[(f*2)+1].Y-v+1 &amp;&amp; j &lt;= init_positions_fires[f*2].Y+v-1) {
+                if(grid[init_positions_fires[f*2].X-v+(j*width)] != FIRE) {
+                    currPos.X = init_positions_fires[f*2].X-v;
+                    currPos.Y = j;
+                    if(!IsDuplicatedGL(currPos) &amp;&amp; !isOverlappedGL(currPos, f)){
+                        fireBoundaryFR[arrayIndexFR] = currPos;
+                        arrayIndexFR++;
+                    }
+                }
+                if(grid[init_positions_fires[(f*2)+1].X+v+(j*width)] != FIRE) {
+                    currPos.X = init_positions_fires[(f*2)+1].X+v;
+                    currPos.Y = j;
+                    if(!IsDuplicatedGL(currPos) &amp;&amp; !isOverlappedGL(currPos, f)){
+                        fireBoundaryFR[arrayIndexFR] = currPos;
+                        arrayIndexFR++;
+                    }
+                }
+            }
+        }
+    }
+    pathLengthFR = arrayIndexFR;
+}
+
+// compute the angle between a position and the centroid
+double angle(pos centroid, pos position) {
+    return atan2(position.Y - centroid.Y, position.X - centroid.X);
+}
+
+// sort the boundary cells so that they form a uniform path around the fires
+void sortBoundaryGL() {
+    pos centroid;
+    pos tmp;
+    centroid.X = 0;
+    centroid.Y = 0;
+    for(i:int[0,pathMaxLength-1]) {
+        centroid.X += fireBoundaryFR[i].X;
+        centroid.Y += fireBoundaryFR[i].Y;
+    }
+    centroid.X = centroid.X / pathLengthFR;
+    centroid.Y = centroid.Y / pathLengthFR;
+
+    for(i:int[0,pathMaxLength-2]) {
+        int min_idx = i;
+        if (i &lt; arrayIndexFR) {
+            for(j:int[0,pathMaxLength-1]) {
+                if(j &gt; i &amp;&amp; j &lt; arrayIndexFR) {
+
+                    if(angle(centroid, fireBoundaryFR[j]) &lt; angle(centroid, fireBoundaryFR[min_idx])) {
+                        min_idx = j;
+                    }
+                    else if(angle(centroid, fireBoundaryFR[j]) == angle(centroid, fireBoundaryFR[min_idx])){
+                        if(fireBoundaryFR[j].X == centroid.X &amp;&amp; fireBoundaryFR[j].Y &gt; centroid.Y &amp;&amp; fireBoundaryFR[j].Y &gt; fireBoundaryFR[min_idx].Y) {
+                            min_idx = j;
+                        }
+                        else if(fireBoundaryFR[j].X == centroid.X &amp;&amp; fireBoundaryFR[j].Y &lt; centroid.Y &amp;&amp; fireBoundaryFR[j].Y &lt; fireBoundaryFR[min_idx].Y){
+                            min_idx = j;
+                        }
+                        else if(fireBoundaryFR[j].Y == centroid.Y &amp;&amp; fireBoundaryFR[j].X &lt; centroid.X &amp;&amp; fireBoundaryFR[j].X &gt; fireBoundaryFR[min_idx].X){
+                             min_idx = j;
+                        }
+                        else if(fireBoundaryFR[j].Y == centroid.Y &amp;&amp; fireBoundaryFR[j].X &gt; centroid.X &amp;&amp; fireBoundaryFR[j].X &lt; fireBoundaryFR[min_idx].X){
+                            min_idx = j;    
+                        }
+                    }
+                }
+            }
+
+            tmp.X = fireBoundaryFR[min_idx].X;
+            tmp.Y = fireBoundaryFR[min_idx].Y;
+            fireBoundaryFR[min_idx].X = fireBoundaryFR[i].X;
+            fireBoundaryFR[min_idx].Y = fireBoundaryFR[i].Y;
+            fireBoundaryFR[i].X = tmp.X;
+            fireBoundaryFR[i].Y = tmp.Y;
+        }
+    }
+}
+
+// initialization of the model
+void system_initialisation(){
+    // global vars
+    for(i:int[0,numMan+numResp-1]){
+        timeToRescue[i] = 0;
+        if(i&lt;numMan){
+            manToSave[i] = -1;
+            isInDanger[i] = false;
+            isDead[i] = false;
+        }
+        else{
+            idZeroResp[i-numMan] = 0; // it should be -1 but the simulator makes some problems...
+        }
+    }
+    // empty grid 
+    for(i:int[0,(width*height)-1]){
+        grid[i]=EMPTY;
+    }
+    // grid with zero and first responders
+    for(i:int[0,numMan+numResp-1]){
+        int x = init_positions_man[i].X;
+        int y = init_positions_man[i].Y;
+        grid[x+(y*width)] = i;
+        globalActualPos[i] = init_positions_man[i];
+        proposedPos[i] = init_positions_man[i];
+    }
+    // exits
+    for(i:int[0,numExits-1]){
+        int x = init_positions_exit[i].X;
+        int y = init_positions_exit[i].Y;
+        grid[x+(y*width)] = EXIT;
+    }
+    // fires
+    for(i:int[init_positions_fires[0].X, init_positions_fires[1].X]){
+       for(j:int[init_positions_fires[1].Y, init_positions_fires[0].Y]){
+           grid[i+(j*width)] = FIRE;
+        }
+    }
+    for(i:int[init_positions_fires[2].X, init_positions_fires[3].X]){
+       for(j:int[init_positions_fires[3].Y, init_positions_fires[2].Y]){
+           grid[i+(j*width)] = FIRE;
+        }
+    }
+    // save fire boundary
+    savefireBoundaryFR(fireDistance);
+    sortBoundaryGL();
+}
+
+// calculating the distance between position 'start' and 'end'
+int distance(pos start, pos end) {
+    int diffX = abs(start.X - end.X);
+    int diffY = abs(start.Y - end.Y);
+    return (diffX &gt; diffY ) ? diffX : diffY;
+}
+</declaration>
+	<template>
+		<name>FResponder</name>
+		<parameter>const int id, int x, int y, int tFR</parameter>
+		<declaration>// local declarations
+clock c;                           // internal clock
+int tB = 0;                        // time when the first responder is busy rescuing a civilian
+int nextX,nextY;                   // coordinates of the next position
+int ZRQueue[numMan];               // queue to save the IDs of the zero responders who asked for help
+int ZRQueueTime[numMan];           // time needed to rescue the civilian in danger associated with the i-th zero responder 
+bool initialization = true;        // keep track if the initialization has already been done
+int qLength = 0;                   // number of tasks (zero responders) in the queue
+int ZRServed = -1;                 // current zero responder who's been served
+int lastZRAdded = -1;              // last zero responder who's been served
+bool queueFull = false;            // true when the queue is full
+int queueMaxLen = numMan;          // max length of the queue
+bool reachedFire = false;          // true when the first responder reached the path around the fires
+pos closestFire = { 0, 0 };        // position of the closest fire cell
+int pathIndex = -1;                // index of the path to follow around the fires
+
+// find the index in the path of a given position
+void findFirstPathIndex(pos newPos){
+    for(i:int[0,pathMaxLength-1]){
+        if(fireBoundaryFR[i].X==newPos.X &amp;&amp; fireBoundaryFR[i].Y==newPos.Y){
+              pathIndex=i;
+              return;
+        }
+    }
+
+    reachedFire = false; // error on evaluating the reachedFire
+}
+
+// check on the validity of the next position
+void nextPos() {
+    pos newPos = { x, y };
+
+    if(!reachedFire) {
+        // the firstResponder has not reached the fire yet
+        newPos.X = (closestFire.X &lt; newPos.X) ? (x-1) : ((closestFire.X &gt; newPos.X) ? (x+1) : x);
+        newPos.Y = (closestFire.Y &lt; newPos.Y) ? (y-1) : ((closestFire.Y &gt; newPos.Y) ? (y+1) : y);
+       
+        if(distance(newPos, closestFire) == 0) { 
+            reachedFire = true;
+            findFirstPathIndex(newPos);
+        }
+        
+    } else {
+        // the firstResponder has reached the fire and starts moving around it
+        newPos.X = fireBoundaryFR[pathIndex].X;
+        newPos.Y = fireBoundaryFR[pathIndex].Y;
+        pathIndex = (pathIndex+1)%pathLengthFR; // problem!! not consistent with the real position (incrememnted even if FR blocked!)
+    }
+    proposedPos[id] = newPos;
+}
+
+// update of the current position (if approved by the semaphore)
+void updateNextPos() {
+    x = globalActualPos[id].X;
+    y = globalActualPos[id].Y;
+}
+
+// function that manages the queue adding new tasks for the first responder
+void addZR(){
+    int ZRid = -1;
+    int rescueTime = -1;
+    if(initialization){
+        for(i:int[0,numMan-1]){
+            ZRQueue[i] = -1;
+            ZRQueueTime[i] = -1;
+        }
+        initialization = false;
+    }
+
+    ZRid = idZeroResp[id-numMan];
+    rescueTime = timeToRescue[id]+tFR;
+
+    if(qLength&lt;queueMaxLen){
+        ZRQueue[qLength]= ZRid;             // saving id of ZR
+        ZRQueueTime[ZRid] = rescueTime;     // saving time to Rescue
+        timeToRescue[ZRid] = rescueTime;    // telling ZR the time needed (queue not considered)
+        qLength = qLength + 1;
+        lastZRAdded = ZRid;
+        if(qLength==1){ 
+           ZRServed = ZRid;
+        }
+    } 
+    else { queueFull = true; }
+}
+
+// function that removes the zero responder who's just been served
+void removeZR(){
+    for(i:int[1,numMan-1]){
+        ZRQueue[i]=ZRQueue[i-1];
+    }
+    //ZRQueue[numMan-1]= -1; just for consistency
+    ZRQueueTime[ZRServed] = -1;
+    qLength=qLength-1;  
+    if(qLength&gt;0){
+        ZRServed = ZRQueue[0];
+    }
+    if(queueFull){ queueFull = false; }
+}
+
+// gets the closest cell containing fire
+pos getClosestFirePoint(pos respPos, pos topLeft, pos bottRight, int &amp;currDist) {
+    pos res;
+
+    res.X = (abs(respPos.X - topLeft.X) &lt; abs(respPos.X - bottRight.X)) ? topLeft.X : bottRight.X;
+    res.Y = (abs(respPos.Y - topLeft.Y) &lt; abs(respPos.Y - bottRight.Y)) ? topLeft.Y : bottRight.Y;
+    // evaluating the distance to pos res found
+    currDist = distance(res, respPos); 
+    // adding a shifting equals to Nv cells 
+    res.X = (res.X == topLeft.X) ? topLeft.X - fireDistance : bottRight.X + fireDistance;
+    res.Y = (res.Y == topLeft.Y) ? topLeft.Y + fireDistance : bottRight.Y - fireDistance;
+    return res;
+}
+
+// among all spots of fire, it gets the closest one and sets it as target position
+void searchClosestFire() {
+    pos respPos = { x, y };
+    int minDist = MAX_STEPS;
+    int currDist;
+    pos currFire;
+    for(i:int[0,numFires-1]){
+        currFire = getClosestFirePoint(respPos, init_positions_fires[i*2], init_positions_fires[(i*2)+1], currDist);
+        // currDist has been already evaluated (and returned) in the previous "getClosestFirePoint" function
+        if(currDist &lt; minDist){
+            minDist = currDist;
+            closestFire = currFire;
+        }
+    }
+}
+
+
+
+</declaration>
+		<location id="id0" x="-212" y="-17">
+			<name x="-204" y="-51">Moving</name>
+			<label kind="invariant" x="-204" y="0">c&lt;=1</label>
+		</location>
+		<location id="id1" x="-807" y="-17">
+			<name x="-917" y="-34">AuthWaiting</name>
+			<committed/>
+		</location>
+		<location id="id2" x="-484" y="-17">
+			<name x="-510" y="0">CalcPos</name>
+			<committed/>
+		</location>
+		<location id="id3" x="-212" y="-272">
+			<name x="-222" y="-306">Init</name>
+			<committed/>
+		</location>
+		<location id="id4" x="297" y="-17">
+			<name x="271" y="0">Free</name>
+			<committed/>
+		</location>
+		<location id="id5" x="25" y="-17">
+			<name x="-9" y="0">Contacted</name>
+			<committed/>
+		</location>
+		<location id="id6" x="569" y="-17">
+			<name x="552" y="17">Busy</name>
+			<label kind="invariant" x="586" y="-17">c&lt;=tB</label>
+		</location>
+		<location id="id7" x="815" y="-17">
+			<name x="840" y="-25">NewJob</name>
+			<committed/>
+		</location>
+		<init ref="id3"/>
+		<transition id="id8">
+			<source ref="id4"/>
+			<target ref="id0"/>
+			<label kind="guard" x="-17" y="93">qLength==0</label>
+			<label kind="assignment" x="-51" y="110">timeToRescue[id]=0,
+c:=0</label>
+			<nail x="25" y="85"/>
+		</transition>
+		<transition id="id9">
+			<source ref="id0"/>
+			<target ref="id5"/>
+			<label kind="synchronisation" x="-144" y="-59">busy[id-numMan]?</label>
+			<label kind="assignment" x="-110" y="-42">addZR()</label>
+		</transition>
+		<transition id="id10" controllable="false">
+			<source ref="id2"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="-722" y="-42">tryingToMove[id]!</label>
+			<label kind="assignment" x="-688" y="-17">nextPos()</label>
+		</transition>
+		<transition id="id11">
+			<source ref="id3"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-161" y="-187">sys_init?</label>
+			<label kind="assignment" x="-195" y="-170">searchClosestFire()</label>
+		</transition>
+		<transition id="id12">
+			<source ref="id0"/>
+			<target ref="id2"/>
+			<label kind="guard" x="-467" y="-42">timeToRescue[id]==0 &amp;&amp; c==1</label>
+		</transition>
+		<transition id="id13">
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-561" y="161">move[id]?</label>
+			<label kind="assignment" x="-562" y="178">c:=0,
+updateNextPos()</label>
+			<nail x="-807" y="153"/>
+			<nail x="-212" y="153"/>
+		</transition>
+		<transition id="id14" controllable="false">
+			<source ref="id7"/>
+			<target ref="id6"/>
+			<label kind="guard" x="645" y="-144">queueFull</label>
+			<label kind="synchronisation" x="594" y="-127">jobRefused[id-numMan]!</label>
+			<nail x="764" y="-102"/>
+			<nail x="620" y="-102"/>
+		</transition>
+		<transition id="id15">
+			<source ref="id6"/>
+			<target ref="id7"/>
+			<label kind="guard" x="645" y="-76">c&lt;=tB</label>
+			<label kind="synchronisation" x="645" y="-59">busy[id-numMan]?</label>
+			<label kind="assignment" x="645" y="-42">addZR()</label>
+			<nail x="671" y="-17"/>
+		</transition>
+		<transition id="id16" controllable="false">
+			<source ref="id7"/>
+			<target ref="id6"/>
+			<label kind="guard" x="645" y="76">!queueFull</label>
+			<label kind="synchronisation" x="611" y="93">contact[lastZRAdded]!</label>
+			<nail x="781" y="68"/>
+			<nail x="620" y="68"/>
+		</transition>
+		<transition id="id17">
+			<source ref="id6"/>
+			<target ref="id4"/>
+			<label kind="guard" x="399" y="85">c&gt;=tB</label>
+			<label kind="assignment" x="382" y="68">removeZR()</label>
+			<nail x="501" y="68"/>
+			<nail x="348" y="68"/>
+		</transition>
+		<transition id="id18" controllable="false">
+			<source ref="id4"/>
+			<target ref="id6"/>
+			<label kind="guard" x="382" y="-93">qLength&gt;0</label>
+			<label kind="synchronisation" x="348" y="-76">serving[ZRServed]!</label>
+			<label kind="assignment" x="322" y="-59">tB:=ZRQueueTime[ZRServed],
+c:=0</label>
+			<nail x="382" y="-17"/>
+			<nail x="467" y="-17"/>
+		</transition>
+		<transition id="id19" controllable="false">
+			<source ref="id5"/>
+			<target ref="id4"/>
+			<label kind="synchronisation" x="67" y="-42">contact[lastZRAdded]!</label>
+		</transition>
+	</template>
+	<template>
+		<name>Drone</name>
+		<parameter>pos actualPos, const int Nv</parameter>
+		<declaration>// local declarations
+clock c;                           // internal clock
+bool canAct = false;               // true when the drone detects a civilian in danger
+int idZeroResponder = -1;          // id of the zero responder instructed to rescue the civilian in danger
+int idVictim = -1;                 // id of the civilian in danger
+int idFirstResponder = -1;         // id of the first responder called to rescue the civilian in danger
+int timeToRescueLocal;             // keep track of the current time to rescue 
+bool respFound = false;            // true when there is a free first responder ready to be called
+bool respBusyFound = false;        // true when a busy first responder is found
+bool instruct;                     // true when the final choice is to instruct the zero responder
+bool reachedFire = false;          // true when the first responder reached the path around the fires  
+pos closestFire = { 0, 0 };        // position of the closest fire cell
+int pathIndex = -1;                // index of the path to follow around the fires  
+int arrayIndex = 0;                // current index
+int pathLength = 0;                // length of the path
+pos fireBoundary[pathMaxLength];   // fire boundaries
+
+// find the index in the path of a given position
+void findFirstPathIndex(pos newPos){
+    for(i:int[0,pathMaxLength-1]){
+        if(fireBoundary[i].X==newPos.X &amp;&amp; fireBoundary[i].Y==newPos.Y){
+              pathIndex=i;
+              return;
+        }
+    }
+
+    reachedFire = false; // error on evaluating the reachedFire
+}
+
+// check on the validity of the next position
+void nextPos() {
+    pos newPos = actualPos;
+    if(!reachedFire) {
+        // the firstResponder has not reached the fire yet
+        newPos.X = (closestFire.X &lt; newPos.X) ? (actualPos.X-1) : ((closestFire.X &gt; newPos.X) ? (actualPos.X+1) : actualPos.X);
+        newPos.Y = (closestFire.Y &lt; newPos.Y) ? (actualPos.Y-1) : ((closestFire.Y &gt; newPos.Y) ? (actualPos.Y+1) : actualPos.Y);
+    
+        if(distance(newPos, closestFire) == 0) { 
+            reachedFire = true;
+            findFirstPathIndex(newPos);
+        }
+    } else {
+        // the firstResponder has reached the fire and starts moving around it
+        newPos.X = fireBoundary[pathIndex].X;
+        newPos.Y = fireBoundary[pathIndex].Y;
+        pathIndex = (pathIndex+1)%pathLength;
+    }
+    actualPos = newPos;
+   // proposedPos[id] = newPos;
+}
+
+// scan of the grid to look for civilians in danger
+void checkForRescue(){
+    idZeroResponder = -1;
+    idVictim = -1;
+    canAct = false;
+    // checking for one victim and one zero responder
+    for(i:int[-Nv,Nv]){
+        for(j:int[-Nv,Nv]){
+            int adjPos = (actualPos.X+i)+((actualPos.Y+j)*width);
+            // checking if the adjacent position is inside the grid
+            if((actualPos.X + i) &gt;= 0 &amp;&amp; (actualPos.X + i) &lt; width &amp;&amp; (actualPos.Y + j) &gt;= 0 &amp;&amp; (actualPos.Y + j) &lt; height) {
+                int id = grid[adjPos];
+                if(idVictim == - 1 &amp;&amp; id &gt;= 0 &amp;&amp; id &lt; numMan &amp;&amp; isInDanger[id]) {
+                    idVictim = id;
+                }
+                if(idZeroResponder  == - 1 &amp;&amp; id &gt;= 0 &amp;&amp; id &lt; numMan &amp;&amp; !isInDanger[id]) {
+                    idZeroResponder = id;
+                }
+            }
+        }
+    }
+    if(idZeroResponder != -1 &amp;&amp; idVictim != -1) {
+        int posZeroResp = globalActualPos[idZeroResponder].X + (globalActualPos[idZeroResponder].Y*width);
+        int posVictim = globalActualPos[idVictim].X + (globalActualPos[idVictim].Y*width);
+        grid[posZeroResp] = EMPTY;
+        grid[posVictim] = EMPTY; 
+        canAct = true;
+    }
+}
+
+// calculating the distance between position 'start' and 'end'
+int distance(pos start, pos end) {
+    int diffX = abs(start.X - end.X);
+    int diffY = abs(start.Y - end.Y);
+    return (diffX &gt;= diffY ) ? diffX : diffY;
+}
+
+// this function id used to inform the ZeroResponder of the victim's id and to search for a free FirstResponder. The drone calculates the distance between 
+// the ZeroResponder and the found FirstResponder + distance between firstResponder and the victim
+void contactFunc() {
+    int idNearerFR = -1;
+    int respDistance = -1;
+    int shortestDistanceFree = -1;
+    int shortestDistanceGlobal = -1;
+    respFound = false;
+    respBusyFound = false;
+
+    for(i:int[numMan,numMan+numResp-1]) {
+        respDistance = distance(globalActualPos[idZeroResponder], globalActualPos[i]) + distance(globalActualPos[i], globalActualPos[idVictim]);
+        // finding the nearest FR (busy or not)
+        if(idNearerFR = -1){ 
+           idNearerFR = i;
+           shortestDistanceGlobal = respDistance;
+        } else if(respDistance &lt; shortestDistanceGlobal){
+            idNearerFR = i;
+            shortestDistanceGlobal = respDistance;
+        }
+        // finding the nearest FREE FR
+        if(timeToRescue[i] == 0) {
+            if(!respFound){
+                idFirstResponder = i;
+                timeToRescueLocal = respDistance;
+                shortestDistanceFree = respDistance;
+                respFound = true;
+            } else if(respFound &amp;&amp; respDistance&lt;shortestDistanceFree){
+                idFirstResponder = i;
+                timeToRescueLocal = respDistance;
+                shortestDistanceFree = respDistance;
+            }
+        }
+    }
+    // in case no free FRs are found, just choose the nearest one
+    if(!respFound) {
+        idFirstResponder = idNearerFR;
+        timeToRescueLocal = shortestDistanceGlobal;
+        respBusyFound = true;
+    }
+}
+
+// this function is used to inform the ZeroResponder of the victim's id. The drone calculates the distance between the ZeroResponder and victim
+void helpFunc() {
+    timeToRescue[idZeroResponder] = distance(globalActualPos[idZeroResponder], globalActualPos[idVictim]);
+}
+
+// take the final decision based on the distances and the time needed for rescuing the victim
+void takeDecision() {
+    int busyWeigth = 1;
+    int distanceZR = distance(globalActualPos[idZeroResponder], globalActualPos[idVictim]);
+    int weightedTime;
+
+    contactFunc();  
+    
+    // re-evaluating the "best FR" distance with respect to the ZR distance, considering also the FR's queue (if it's already busy or not)
+    busyWeigth = respBusyFound ? (numMan/numResp) : 1;
+    weightedTime = busyWeigth * (timeToRescueLocal * ( 100 - (distanceZR*100/timeToRescueLocal)));
+    weightedTime = weightedTime/100;
+
+    // choosing the first responder is better since they have a lower tFR
+    if(weightedTime &lt;= distanceZR) {
+        // first responder
+        timeToRescue[idFirstResponder] = timeToRescueLocal;
+        idZeroResp[idFirstResponder-numMan] = idZeroResponder;
+        instruct = false;   
+    } else {
+        // zero responder
+        timeToRescue[idZeroResponder] = distanceZR;
+        instruct = true;
+    }
+    manToSave[idZeroResponder] = idVictim;
+}
+
+// gets the closest cell containing fire
+pos getClosestFirePoint(pos respPos, pos topLeft, pos bottRight, int &amp;currDist) {
+    pos res;
+    
+    res.X = (abs(respPos.X - topLeft.X) &lt; abs(respPos.X - bottRight.X)) ? topLeft.X : bottRight.X;
+    res.Y = (abs(respPos.Y - topLeft.Y) &lt; abs(respPos.Y - bottRight.Y)) ? topLeft.Y : bottRight.Y;
+    // evaluating the distance to pos res found
+    currDist = distance(res, actualPos); 
+    // adding a shifting equals to Nv cells 
+    res.X = (res.X == topLeft.X) ? topLeft.X - Nv : bottRight.X + Nv;
+    res.Y = (res.Y == topLeft.Y) ? topLeft.Y + Nv : bottRight.Y - Nv;
+    return res;
+}
+
+// among all spots of fire, it gets the closest one and sets it as target position
+void searchClosestFire() {
+    int minDist = MAX_STEPS;
+    int currDist;
+    pos currFire;
+    for(i:int[0,numFires-1]){
+        currFire = getClosestFirePoint(actualPos, init_positions_fires[i*2], init_positions_fires[(i*2)+1], currDist);
+        // currDist has been already evaluated (and returned) in the previous "getClosestFirePoint" function
+        if(currDist &lt; minDist){
+            minDist = currDist;
+            closestFire = currFire;
+        }
+    }
+}
+
+// check if a fire boundary is already present
+bool IsDuplicated(pos newPos){
+    int i=0;
+    for(i=0; i&lt;pathMaxLength; i++){
+        if(i&lt;arrayIndex &amp;&amp; fireBoundary[i].X == newPos.X &amp;&amp; fireBoundary[i].Y == newPos.Y){
+            return true;
+        }
+    }
+    return false;
+}
+
+// check if a fire boundary is overlapped with a fire
+bool isOverlapped(pos newPos, int fire){
+    int f = 0;   
+    for(f=0; f&lt;numFires; f++){
+        if(f!=fire &amp;&amp; newPos.X &gt;= init_positions_fires[f*2].X-Nv &amp;&amp; newPos.X &lt;= init_positions_fires[(f*2)+1].X+Nv 
+             &amp;&amp; newPos.Y &gt;= init_positions_fires[(f*2)+1].Y-Nv &amp;&amp; newPos.Y &lt;= init_positions_fires[f*2].Y+Nv){
+                 return true;
+        }
+    }
+    return false;
+}
+
+// sort the boundary cells so that they form a uniform path around the fires
+void sortBoundary() {
+    pos centroid;
+    pos tmp;
+    centroid.X = 0;
+    centroid.Y = 0;
+    for(i:int[0,pathMaxLength-1]) {
+        centroid.X += fireBoundary[i].X;
+        centroid.Y += fireBoundary[i].Y;
+    }
+    centroid.X = centroid.X / pathLength;
+    centroid.Y = centroid.Y / pathLength;
+
+    for(i:int[0,pathMaxLength-2]) {
+        int min_idx = i;
+        if (i &lt; arrayIndex) {
+            for(j:int[0,pathMaxLength-1]) {
+                if(j &gt; i &amp;&amp; j &lt; arrayIndex) {
+                    if(angle(centroid, fireBoundary[j]) &lt; angle(centroid, fireBoundary[min_idx])) {
+                        min_idx = j;
+                    }
+                    else if(angle(centroid, fireBoundary[j]) == angle(centroid, fireBoundary[min_idx])){
+                        if(fireBoundary[j].X == centroid.X &amp;&amp; fireBoundary[j].Y &gt; centroid.Y &amp;&amp; fireBoundary[j].Y &gt; fireBoundary[min_idx].Y) {
+                            min_idx = j;
+                        }
+                        else if(fireBoundary[j].X == centroid.X &amp;&amp; fireBoundary[j].Y &lt; centroid.Y &amp;&amp; fireBoundary[j].Y &lt; fireBoundary[min_idx].Y){
+                            min_idx = j;
+                        }
+                        else if(fireBoundary[j].Y == centroid.Y &amp;&amp; fireBoundary[j].X &lt; centroid.X &amp;&amp; fireBoundary[j].X &gt; fireBoundary[min_idx].X){
+                             min_idx = j;
+                        }
+                        else if(fireBoundary[j].Y == centroid.Y &amp;&amp; fireBoundary[j].X &gt; centroid.X &amp;&amp; fireBoundary[j].X &lt; fireBoundary[min_idx].X){
+                            min_idx = j;    
+                        }
+                    }   
+                }
+            }
+            tmp.X = fireBoundary[min_idx].X;
+            tmp.Y = fireBoundary[min_idx].Y;
+            fireBoundary[min_idx].X = fireBoundary[i].X;
+            fireBoundary[min_idx].Y = fireBoundary[i].Y;
+            fireBoundary[i].X = tmp.X;
+            fireBoundary[i].Y = tmp.Y;
+        }
+    }
+}
+
+// computation of the fire boundaries given a distance v
+void saveFireBoundary(int v) {
+    pos currPos;
+    int f=0;
+    for(f=0; f&lt;numFires; f++){
+        for(i:int[0, width]) {
+            if(i &gt;= init_positions_fires[f*2].X-v &amp;&amp; i &lt;= init_positions_fires[(f*2)+1].X+v) {
+                if(grid[i+((init_positions_fires[f*2].Y+v)*width)] != FIRE) {
+                    currPos.X = i;
+                    currPos.Y = init_positions_fires[f*2].Y+v;
+                    if(!IsDuplicated(currPos) &amp;&amp; !isOverlapped(currPos, f)){
+                        fireBoundary[arrayIndex] = currPos;
+                        arrayIndex++;
+                    }
+                }
+                if(grid[i+((init_positions_fires[(f*2)+1].Y-v)*width)] != FIRE) {
+                    currPos.X = i;
+                    currPos.Y = init_positions_fires[(f*2)+1].Y-v;
+                    if(!IsDuplicated(currPos) &amp;&amp; !isOverlapped(currPos, f)){
+                        fireBoundary[arrayIndex] = currPos;
+                        arrayIndex++;
+                    }
+                }
+            }
+        }
+        for(j:int[0, height]) {
+            if(j &gt;= init_positions_fires[(f*2)+1].Y-v+1 &amp;&amp; j &lt;= init_positions_fires[f*2].Y+v-1) {
+                if(grid[init_positions_fires[f*2].X-v+(j*width)] != FIRE) {
+                    currPos.X = init_positions_fires[f*2].X-v;
+                    currPos.Y = j;
+                    if(!IsDuplicated(currPos) &amp;&amp; !isOverlapped(currPos, f)){
+                        fireBoundary[arrayIndex] = currPos;
+                        arrayIndex++;
+                    }
+                }
+                if(grid[init_positions_fires[(f*2)+1].X+v+(j*width)] != FIRE) {
+                    currPos.X = init_positions_fires[(f*2)+1].X+v;
+                    currPos.Y = j;
+                    if(!IsDuplicated(currPos) &amp;&amp; !isOverlapped(currPos, f)){
+                        fireBoundary[arrayIndex] = currPos;
+                        arrayIndex++;
+                    }
+                }
+            }
+        }
+    }
+    pathLength = arrayIndex;
+}
+
+// drone initialization
+void droneInit() {
+    saveFireBoundary(Nv);
+    sortBoundary();
+    searchClosestFire();
+}
+
+
+
+</declaration>
+		<location id="id20" x="170" y="0">
+			<name x="187" y="17">Moving</name>
+			<label kind="invariant" x="187" y="34">c&lt;=1</label>
+		</location>
+		<location id="id21" x="-314" y="306">
+			<name x="-374" y="323">ComputeNextPos</name>
+			<committed/>
+		</location>
+		<location id="id22" x="-578" y="0">
+			<name x="-867" y="-33">TakeDecision</name>
+			<committed/>
+		</location>
+		<location id="id23" x="-323" y="-178">
+			<name x="-382" y="-212">FRContacted</name>
+			<committed/>
+		</location>
+		<location id="id24" x="-467" y="-76">
+			<name x="-535" y="-101">FindFR</name>
+			<committed/>
+		</location>
+		<location id="id25" x="-221" y="0">
+			<name x="-263" y="17">InstructZR</name>
+			<committed/>
+		</location>
+		<location id="id26" x="-799" y="0">
+			<committed/>
+		</location>
+		<location id="id27" x="484" y="0">
+			<name x="510" y="-8">Init</name>
+			<committed/>
+		</location>
+		<init ref="id27"/>
+		<transition id="id28">
+			<source ref="id27"/>
+			<target ref="id20"/>
+			<label kind="synchronisation" x="297" y="-25">sys_init?</label>
+			<label kind="assignment" x="297" y="8">droneInit()</label>
+		</transition>
+		<transition id="id29">
+			<source ref="id26"/>
+			<target ref="id20"/>
+			<label kind="guard" x="-323" y="153">!canAct</label>
+			<label kind="assignment" x="-314" y="170">c:=0</label>
+			<nail x="-306" y="145"/>
+		</transition>
+		<transition id="id30">
+			<source ref="id26"/>
+			<target ref="id22"/>
+			<label kind="guard" x="-722" y="-42">canAct</label>
+			<label kind="assignment" x="-748" y="-25">takeDecision()</label>
+		</transition>
+		<transition id="id31">
+			<source ref="id21"/>
+			<target ref="id26"/>
+			<label kind="assignment" x="-697" y="315">checkForRescue()</label>
+			<nail x="-799" y="306"/>
+		</transition>
+		<transition id="id32">
+			<source ref="id23"/>
+			<target ref="id25"/>
+			<label kind="synchronisation" x="-255" y="-118">jobRefused[idFirstResponder-numMan]?</label>
+			<label kind="assignment" x="-255" y="-101">helpFunc()</label>
+		</transition>
+		<transition id="id33">
+			<source ref="id23"/>
+			<target ref="id20"/>
+			<label kind="synchronisation" x="-170" y="-203">contact[idZeroResponder]?</label>
+			<label kind="assignment" x="-85" y="-178">c:=0</label>
+			<nail x="170" y="-178"/>
+		</transition>
+		<transition id="id34" controllable="false">
+			<source ref="id25"/>
+			<target ref="id20"/>
+			<label kind="synchronisation" x="-136" y="-25">help[idZeroResponder]!</label>
+			<label kind="assignment" x="-68" y="0">c:=0</label>
+		</transition>
+		<transition id="id35">
+			<source ref="id22"/>
+			<target ref="id25"/>
+			<label kind="guard" x="-442" y="-25">instruct</label>
+		</transition>
+		<transition id="id36" controllable="false">
+			<source ref="id24"/>
+			<target ref="id23"/>
+			<label kind="synchronisation" x="-663" y="-144">busy[idFirstResponder-numMan]!</label>
+		</transition>
+		<transition id="id37">
+			<source ref="id22"/>
+			<target ref="id24"/>
+			<label kind="guard" x="-595" y="-59">!instruct</label>
+		</transition>
+		<transition id="id38">
+			<source ref="id20"/>
+			<target ref="id21"/>
+			<label kind="guard" x="-42" y="306">c==1</label>
+			<label kind="assignment" x="-68" y="280">nextPos()</label>
+			<nail x="170" y="306"/>
+		</transition>
+	</template>
+	<template>
+		<name x="5" y="5">Civilians</name>
+		<parameter>const int id, int x, int y, const int tZR, const int Tv</parameter>
+		<declaration>// local declarations
+clock c;                       // internal clock
+int tR;                        // time to rescue a civilian in danger                 
+bool isSafe = false;           // true when the civilian is close to the fire (in danger)
+int nextX,nextY;               // coordinates of the next position
+int closestExit = 0;           // index of the closest exit
+bool rescue = false;
+
+void updateStat() {
+    if(rescue) {
+        numZRSaved = numZRSaved + 1;
+    } else {
+        numFRSaved = numFRSaved + 1;
+    }
+}
+
+// search for the closest exit to go straight towards it
+void searchClosestExit() {
+    pos civPos = { x, y };
+    int minDist = distance(init_positions_exit[0], civPos);
+    int currDist = 0;
+    pos currExit;
+    for(i:int[1,numExits-1]){
+        currExit = init_positions_exit[i];
+        currDist = distance(currExit, civPos);
+        if(currDist &lt; minDist){
+            minDist = currDist;
+            closestExit = i;
+        }
+    }
+}
+
+// check on the validity of the next position
+void nextPos() {
+    pos newPos = { x, y };
+
+    newPos.X = (init_positions_exit[closestExit].X &lt; newPos.X) ? (x-1) : ((init_positions_exit[closestExit].X &gt; newPos.X) ? (x+1) : x);    
+    newPos.Y = (init_positions_exit[closestExit].Y &lt; newPos.Y) ? (y-1) : ((init_positions_exit[closestExit].Y &gt; newPos.Y) ? (y+1) : y);
+
+    proposedPos[id] = newPos;
+}
+
+// updating the status of the civilian. If close to the exit -&gt; safe, if close to the fire -&gt; danger
+void checkStatus() {
+    // checking fire and exits on adjacent cells
+    for(i:int[-1,1]){
+        for(j:int[-1,1]){
+            int adjPos = (x+i)+((y+j)*width);
+            // checking if the adjacent position is inside the grid
+            if((x + i) &gt;= 0 &amp;&amp; (x + i) &lt; width &amp;&amp; (y + j) &gt;= 0 &amp;&amp; (y + j) &lt; height) {
+                if(grid[adjPos] == FIRE){ isInDanger[id] = true; }
+                if(grid[adjPos] == EXIT){ isSafe = true; }
+            }
+        }
+    }
+    if(isSafe) {
+        grid[x+(y*width)] = EMPTY;
+        numSaved = numSaved + 1;
+    }
+}
+
+// update of the current position (if approved by the semaphore)
+void updateNextPos() {
+    x = globalActualPos[id].X;
+    y = globalActualPos[id].Y;
+    // checking if the new position is near the fire
+    checkStatus();
+}
+
+void updateSaved() {
+    numSaved = numSaved + 1;
+}
+
+void emptyGrid() {
+    grid[x+(y*width)] = EMPTY;
+}
+
+
+</declaration>
+		<location id="id39" x="-315" y="-17">
+			<name x="-289" y="-42">Moving</name>
+			<label kind="invariant" x="-314" y="-8">c&lt;=1</label>
+		</location>
+		<location id="id40" x="314" y="-289">
+			<name x="304" y="-323">Dead</name>
+		</location>
+		<location id="id41" x="102" y="323">
+			<name x="85" y="340">Safe</name>
+		</location>
+		<location id="id42" x="59" y="-289">
+			<name x="33" y="-323">Danger</name>
+			<label kind="invariant" x="33" y="-263">c &lt;= Tv</label>
+		</location>
+		<location id="id43" x="-17" y="-17">
+			<name x="-85" y="-42">Rescue</name>
+			<label kind="invariant" x="-85" y="-8">c &lt;= tR</label>
+		</location>
+		<location id="id44" x="-620" y="-17">
+			<name x="-646" y="0">CalcPos</name>
+			<committed/>
+		</location>
+		<location id="id45" x="-918" y="-17">
+			<name x="-986" y="-59">AuthWaiting</name>
+			<committed/>
+		</location>
+		<location id="id46" x="-722" y="-289">
+			<name x="-739" y="-323">Init</name>
+			<committed/>
+		</location>
+		<location id="id47" x="-17" y="-136">
+			<name x="-61" y="-170">WaitingTurn</name>
+		</location>
+		<init ref="id46"/>
+		<transition id="id48">
+			<source ref="id47"/>
+			<target ref="id43"/>
+			<label kind="synchronisation" x="0" y="-102">serving[id]?</label>
+			<label kind="assignment" x="0" y="-85">c:=0</label>
+		</transition>
+		<transition id="id49">
+			<source ref="id39"/>
+			<target ref="id47"/>
+			<label kind="synchronisation" x="-221" y="-195">contact[id]?</label>
+			<label kind="assignment" x="-246" y="-178">tR:=timeToRescue[id],
+rescue = false</label>
+			<nail x="-238" y="-136"/>
+		</transition>
+		<transition id="id50" controllable="false">
+			<source ref="id44"/>
+			<target ref="id45"/>
+			<label kind="synchronisation" x="-841" y="-42">tryingToMove[id]!</label>
+			<label kind="assignment" x="-807" y="-17">nextPos()</label>
+		</transition>
+		<transition id="id51">
+			<source ref="id46"/>
+			<target ref="id39"/>
+			<label kind="synchronisation" x="-561" y="-314">sys_init?</label>
+			<label kind="assignment" x="-586" y="-280">searchClosestExit(),
+checkStatus()</label>
+			<nail x="-340" y="-289"/>
+		</transition>
+		<transition id="id52">
+			<source ref="id39"/>
+			<target ref="id44"/>
+			<label kind="guard" x="-586" y="-85">timeToRescue[id]==0 &amp;&amp; c==1 &amp;&amp;
+!isInDanger[id] &amp;&amp;
+!isSafe</label>
+		</transition>
+		<transition id="id53">
+			<source ref="id45"/>
+			<target ref="id39"/>
+			<label kind="synchronisation" x="-663" y="110">move[id]?</label>
+			<label kind="assignment" x="-663" y="136">c:=0,
+updateNextPos()</label>
+			<nail x="-824" y="136"/>
+			<nail x="-433" y="136"/>
+		</transition>
+		<transition id="id54">
+			<source ref="id43"/>
+			<target ref="id41"/>
+			<label kind="guard" x="-221" y="153">c&gt;=tR &amp;&amp; isDead[manToSave[id]]</label>
+			<label kind="assignment" x="-170" y="170">updateSaved()</label>
+		</transition>
+		<transition id="id55">
+			<source ref="id39"/>
+			<target ref="id41"/>
+			<label kind="guard" x="-161" y="297">isSafe</label>
+			<nail x="-314" y="323"/>
+		</transition>
+		<transition id="id56">
+			<source ref="id39"/>
+			<target ref="id43"/>
+			<label kind="synchronisation" x="-246" y="-8">help[id]?</label>
+			<label kind="assignment" x="-246" y="8">c := 0,
+tR := timeToRescue[id]+tZR,
+rescue = true</label>
+			<nail x="-153" y="-17"/>
+		</transition>
+		<transition id="id57" controllable="false">
+			<source ref="id43"/>
+			<target ref="id41"/>
+			<label kind="guard" x="34" y="-51">c &gt;= tR &amp;&amp; !isDead[manToSave[id]]</label>
+			<label kind="synchronisation" x="119" y="-34">saved[manToSave[id]]!</label>
+			<label kind="assignment" x="119" y="-17">updateSaved(),
+updateStat()</label>
+			<nail x="102" y="-17"/>
+		</transition>
+		<transition id="id58">
+			<source ref="id42"/>
+			<target ref="id41"/>
+			<label kind="synchronisation" x="357" y="-59">saved[id]?</label>
+			<label kind="assignment" x="323" y="-76">updateSaved()</label>
+			<nail x="382" y="0"/>
+			<nail x="382" y="0"/>
+		</transition>
+		<transition id="id59">
+			<source ref="id42"/>
+			<target ref="id40"/>
+			<label kind="guard" x="136" y="-314">c &gt;= Tv</label>
+			<label kind="assignment" x="136" y="-280">isDead[id]=true,
+emptyGrid()</label>
+		</transition>
+		<transition id="id60">
+			<source ref="id39"/>
+			<target ref="id42"/>
+			<label kind="guard" x="-289" y="-314">isInDanger[id] &amp;&amp; !isSafe</label>
+			<label kind="assignment" x="-212" y="-289">c := 0</label>
+			<nail x="-306" y="-289"/>
+		</transition>
+	</template>
+	<template>
+		<name>Semaphore</name>
+		<declaration>int id;            // id of the contacted civilian
+
+void checkProposedPos(int propId){
+    int propX =  proposedPos[propId].X;
+    int propY =  proposedPos[propId].Y;
+    int actualX = globalActualPos[propId].X;
+    int actualY = globalActualPos[propId].Y;
+    int gridPos = propX+(width*propY);
+    id = propId;
+
+    if(grid[gridPos]==EMPTY){
+        // update of GRID 
+        grid[actualX+(actualY*width)] = EMPTY;
+        // update of actual position for civilians ID
+        globalActualPos[id].X = propX;
+        globalActualPos[id].Y = propY;
+        grid[propX+(propY*width)] = id;
+    }
+}
+</declaration>
+		<location id="id61" x="-255" y="-17">
+			<name x="-280" y="-51">Waiting</name>
+		</location>
+		<location id="id62" x="85" y="-17">
+			<name x="75" y="-51">Check</name>
+			<committed/>
+		</location>
+		<location id="id63" x="-510" y="-17">
+			<name x="-520" y="-51">Idle</name>
+			<committed/>
+		</location>
+		<init ref="id63"/>
+		<transition id="id64" controllable="false">
+			<source ref="id63"/>
+			<target ref="id61"/>
+			<label kind="synchronisation" x="-416" y="-42">sys_init!</label>
+			<label kind="assignment" x="-476" y="-8">system_initialisation()</label>
+		</transition>
+		<transition id="id65" controllable="false">
+			<source ref="id62"/>
+			<target ref="id61"/>
+			<label kind="synchronisation" x="-110" y="51">move[id]!</label>
+			<nail x="-76" y="42"/>
+		</transition>
+		<transition id="id66">
+			<source ref="id61"/>
+			<target ref="id62"/>
+			<label kind="select" x="-187" y="-161">propId:int[0,(numMan+numResp)-1]</label>
+			<label kind="synchronisation" x="-153" y="-136">tryingToMove[propId]?</label>
+			<label kind="assignment" x="-170" y="-110">checkProposedPos(propId)</label>
+			<nail x="-85" y="-85"/>
+		</transition>
+	</template>
+	<system>// Template instantiations
+
+// civilians
+C0 = Civilians(0, init_positions_man[0].X, init_positions_man[0].Y, parametric_rescue[0], parametric_life[0]);
+C1 = Civilians(1, init_positions_man[1].X, init_positions_man[1].Y, parametric_rescue[1], parametric_life[1]);
+C2 = Civilians(2, init_positions_man[2].X, init_positions_man[2].Y, parametric_rescue[2], parametric_life[2]);
+C3 = Civilians(3, init_positions_man[3].X, init_positions_man[3].Y, parametric_rescue[3], parametric_life[3]);
+C4 = Civilians(4, init_positions_man[4].X, init_positions_man[4].Y, parametric_rescue[4], parametric_life[4]);
+C5 = Civilians(5, init_positions_man[5].X, init_positions_man[5].Y, parametric_rescue[5], parametric_life[5]);
+C6 = Civilians(6, init_positions_man[6].X, init_positions_man[6].Y, parametric_rescue[6], parametric_life[6]);
+C7 = Civilians(7, init_positions_man[7].X, init_positions_man[7].Y, parametric_rescue[7], parametric_life[7]);
+C8 = Civilians(8, init_positions_man[8].X, init_positions_man[8].Y, parametric_rescue[8], parametric_life[8]);
+C9 = Civilians(9, init_positions_man[9].X, init_positions_man[9].Y, parametric_rescue[9], parametric_life[9]);
+C10 = Civilians(10, init_positions_man[10].X, init_positions_man[10].Y, parametric_rescue[10], parametric_life[10]);
+C11 = Civilians(11, init_positions_man[11].X, init_positions_man[11].Y, parametric_rescue[11], parametric_life[11]);
+C12 = Civilians(12, init_positions_man[12].X, init_positions_man[12].Y, parametric_rescue[12], parametric_life[12]);
+C13 = Civilians(13, init_positions_man[13].X, init_positions_man[13].Y, parametric_rescue[13], parametric_life[13]);
+
+// first responders
+R14 = FResponder(14, init_positions_man[14].X, init_positions_man[14].Y, parametric_rescue[14]);
+R15 = FResponder(15, init_positions_man[15].X, init_positions_man[15].Y, parametric_rescue[15]);
+R16 = FResponder(16, init_positions_man[16].X, init_positions_man[16].Y, parametric_rescue[16]);
+
+// drones
+D1 = Drone(init_actual_D1, 1);
+D2 = Drone(init_actual_D2, 1);
+D3 = Drone(init_actual_D3, 2);
+D4 = Drone(init_actual_D4, 2);
+
+// semaphore
+S = Semaphore();
+
+// system declaration
+system C0,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,R14,R15,R16,D1,D2,D3,D4,S;</system>
+	<queries>
+		<query>
+			<formula>E&lt;&gt;(numSaved&gt;=9 &amp;&amp; tscs&lt;=10)</formula>
+			<comment>It is possible for a percentage 9/14 of all civilians to reach a safe state within 10 time units</comment>
+			<option key="--exploration" value="1"/>
+			<result outcome="success" type="quality" timestamp="2024-07-15 14:29:09 +0200">
+				<option key="--exploration" value="1"/>
+			</result>
+		</query>
+		<query>
+			<formula>A&lt;&gt;(numSaved&gt;=1 &amp;&amp; tscs&lt;=1)</formula>
+			<comment>A percentage 1/14 of all civilians is always guaranteed to reach a safe state within 1 time unit</comment>
+			<option key="--exploration" value="0"/>
+			<result outcome="success" type="quality" timestamp="2024-07-15 14:54:46 +0200">
+				<option key="--exploration" value="0"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(((numFRSaved+numZRSaved)*100)/numSaved &gt;= 30)</formula>
+			<comment>It is possible to reach a percentage 30% of civilians rescued by others over the total amount of saved civilians</comment>
+			<option key="--exploration" value="1"/>
+			<result outcome="success" type="quality" timestamp="2024-07-21 17:40:46 +0200">
+				<option key="--exploration" value="1"/>
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt;(numFRSaved&gt;=2)</formula>
+			<comment>It is possible to reach a number of 2 rescues by the first responders</comment>
+			<option key="--exploration" value="1"/>
+			<result outcome="success" type="quality" timestamp="2024-07-22 11:08:09 +0200">
+				<option key="--exploration" value="1"/>
+			</result>
+		</query>
+	</queries>
+</nta>
